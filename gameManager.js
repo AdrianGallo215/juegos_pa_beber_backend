@@ -25,7 +25,8 @@ class GameManager {
             roundVotes: {},
             roundEndTime: 0,
             stopCalledBy: null,
-            votingIdx: 0
+            votingIdx: 0,
+            history: [] // Store { round, letter, results: [{playerId, answers, scores}] }
         };
 
         this.rooms.set(code, room);
@@ -50,7 +51,7 @@ class GameManager {
             return { room, isRejoin: true };
         }
 
-        if (room.state !== 'LOBBY') return { error: 'Game already started' };
+        if (room.state !== 'LOBBY' && room.state !== 'ROUND_RESULTS') return { error: 'Game in progress' };
 
         room.players.push({ id: playerId, name: playerName, score: 0, connected: true, socketId });
         this.socketMap.set(socketId, { roomCode: code, playerId });
@@ -86,6 +87,8 @@ class GameManager {
         room.answers = {};
         room.stopCalledBy = null;
         room.roundEndTime = Date.now() + 180 * 1000;
+        room.votingIdx = 0;
+        room.roundVotes = {};
 
         this.io.to(code).emit('round_started', {
             round: room.round,
@@ -104,6 +107,21 @@ class GameManager {
 
         this.io.to(code).emit('round_stopped', { stoppedBy: playerId });
         room.state = 'COLLECTING_ANSWERS';
+    }
+
+    resetGame(code) {
+        const room = this.rooms.get(code);
+        if (!room) return;
+
+        room.state = 'LOBBY';
+        room.round = 0;
+        room.players.forEach(p => p.score = 0);
+        room.usedLetters = [];
+        room.answers = {};
+        room.history = [];
+        room.currentLetter = '';
+
+        this.io.to(code).emit('game_reset', { players: room.players });
     }
 }
 

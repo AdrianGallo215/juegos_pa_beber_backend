@@ -113,6 +113,10 @@ module.exports = (io) => {
             }
         });
 
+        socket.on('reset_game', ({ code }) => {
+            gameManager.resetGame(code);
+        });
+
         socket.on('submit_votes', ({ code, targetPlayerId, votes }) => {
             const info = gameManager.socketMap.get(socket.id);
             if (!info) return;
@@ -120,31 +124,60 @@ module.exports = (io) => {
             const room = gameManager.rooms.get(code);
             if (!room || room.state !== 'VOTING') return;
 
+            // Prevent self-voting counting in logic (though UI should block it too)
+            if (info.playerId === targetPlayerId) {
+                // We can accept the "submit" to ack they are done, but don't count the votes?
+                // Or better, assume they vote "true" for themselves?
+                // Logic says: "Uno no puede votar por sí mismo".
+                // So we just don't add their votes to the tally.
+                // But we DO need to record that they have "voted" (completed the action) to progress.
+            }
+
             if (!room.roundVotes) room.roundVotes = {};
             room.roundVotes[info.playerId] = votes;
 
-            // Check against TOTAL players (including target)
-            if (Object.keys(room.roundVotes).length >= room.players.length) {
+            // Check completion. We expect votes from ALL active players.
+            // If 4 players, we need 4 vote submissions.
+            const activeCount = room.players.filter(p => p.connected).length;
+
+            if (Object.keys(room.roundVotes).length >= activeCount) {
                 // Tally
                 const targetPlayer = room.players[room.votingIdx];
                 let roundScore = 0;
                 const targetAnswers = room.answers[targetPlayerId] || {};
 
+                // Store validation results for history
+                if (!targetPlayer.roundResults) targetPlayer.roundResults = {};
+
                 room.categories.forEach(cat => {
                     const word = targetAnswers[cat];
-                    if (!word) return;
+                    if (!word) {
+                        targetPlayer.roundResults[cat] = false;
+                        return;
+                    }
 
                     let validVotes = 0;
                     let totalVotes = 0;
 
-                    Object.values(room.roundVotes).forEach(voterVotes => {
+                    Object.entries(room.roundVotes).forEach(([voterId, voterVotes]) => {
+                        // Ignore self votes in TALLY
+                        if (voterId === targetPlayerId) return;
+
                         if (voterVotes[cat] === true) validVotes++;
                         totalVotes++;
                     });
 
-                    if (validVotes > totalVotes / 2) {
+                    // If totalVotes is 0 (only 1 player?), assume valid? Or require at least 1?
+                    // Single player mode: always valid?
+                    // Multiplayer: > 50%
+                    let isValid = false;
+                    if (totalVotes === 0) isValid = true;
+                    else if (validVotes > totalVotes / 2) isValid = true;
+
+                    if (isValid) {
                         roundScore += 10;
                     }
+                    targetPlayer.roundResults[cat] = isValid;
                 });
 
                 targetPlayer.score += roundScore;
@@ -187,8 +220,29 @@ function endRound(io, room) {
     room.state = 'ROUND_RESULTS';
     const leaderboard = [...room.players].sort((a, b) => b.score - a.score);
 
+    // Compile details for this round
+    const roundDetails = room.players.map(p => ({
+        id: p.id,
+        name: p.name,
+        answers: room.answers[p.id] || {},
+        validations: p.roundResults || {},
+        totalScore: p.score
+    }));
+
+    // Save to history if needed
+    room.history.push({
+        round: room.round,
+        letter: room.currentLetter,
+        details: roundDetails
+    });
+
     io.to(room.code).emit('round_ended', {
         leaderboard,
-        isGameOver: room.round >= room.maxRounds
+        isGameOver: room.round >= room.maxRounds,
+        roundDetails, // Send current round details
+        categories: room.categories
     });
+
+    // Clear temporary round data safely
+    room.players.forEach(p => delete p.roundResults);
 }
