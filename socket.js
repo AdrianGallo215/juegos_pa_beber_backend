@@ -124,23 +124,23 @@ module.exports = (io) => {
             const room = gameManager.rooms.get(code);
             if (!room || room.state !== 'VOTING') return;
 
-            // Prevent self-voting counting in logic (though UI should block it too)
-            if (info.playerId === targetPlayerId) {
-                // We can accept the "submit" to ack they are done, but don't count the votes?
-                // Or better, assume they vote "true" for themselves?
-                // Logic says: "Uno no puede votar por sí mismo".
-                // So we just don't add their votes to the tally.
-                // But we DO need to record that they have "voted" (completed the action) to progress.
-            }
-
             if (!room.roundVotes) room.roundVotes = {};
             room.roundVotes[info.playerId] = votes;
 
-            // Check completion. We expect votes from ALL active players.
-            // If 4 players, we need 4 vote submissions.
-            const activeCount = room.players.filter(p => p.connected).length;
+            // Emit progress update
+            const voters = Object.keys(room.roundVotes);
+            // Voters needed = all connected players EXCEPT target
+            const activePlayers = room.players.filter(p => p.connected);
+            const neededVoters = activePlayers.filter(p => p.id !== targetPlayerId).length;
 
-            if (Object.keys(room.roundVotes).length >= activeCount) {
+            io.to(code).emit('voting_progress', {
+                voters,
+                totalNeeded: neededVoters
+            });
+
+            // Check completion
+            // We need votes from ALL other players
+            if (voters.length >= neededVoters) {
                 // Tally
                 const targetPlayer = room.players[room.votingIdx];
                 let roundScore = 0;
@@ -148,11 +148,14 @@ module.exports = (io) => {
 
                 // Store validation results for history
                 if (!targetPlayer.roundResults) targetPlayer.roundResults = {};
+                const detailedResults = {}; // For interim display
 
                 room.categories.forEach(cat => {
                     const word = targetAnswers[cat];
+                    // Auto-fail empty
                     if (!word) {
                         targetPlayer.roundResults[cat] = false;
+                        detailedResults[cat] = { word: '', valid: false, votesFor: 0, votesAgainst: neededVoters };
                         return;
                     }
 
@@ -160,42 +163,44 @@ module.exports = (io) => {
                     let totalVotes = 0;
 
                     Object.entries(room.roundVotes).forEach(([voterId, voterVotes]) => {
-                        // Ignore self votes in TALLY
-                        if (voterId === targetPlayerId) return;
-
+                        if (voterId === targetPlayerId) return; // Should already be filtered but safety
                         if (voterVotes[cat] === true) validVotes++;
                         totalVotes++;
                     });
 
-                    // If totalVotes is 0 (only 1 player?), assume valid? Or require at least 1?
-                    // Single player mode: always valid?
-                    // Multiplayer: > 50%
+                    // Logic: > 50% of VOTERS (not total players, just those who voted? We enforced all must vote)
                     let isValid = false;
-                    if (totalVotes === 0) isValid = true;
+                    if (totalVotes === 0) isValid = true; // No other players?
                     else if (validVotes > totalVotes / 2) isValid = true;
 
                     if (isValid) {
                         roundScore += 10;
                     }
                     targetPlayer.roundResults[cat] = isValid;
+                    detailedResults[cat] = { word, valid: isValid, votesFor: validVotes, votesAgainst: totalVotes - validVotes };
                 });
 
                 targetPlayer.score += roundScore;
 
-                io.to(code).emit('player_results', {
-                    playerId: targetPlayerId,
+                // Emit INTERIM results
+                io.to(code).emit('player_round_total', {
+                    player: { id: targetPlayer.id, name: targetPlayer.name },
                     roundScore,
-                    totalScore: targetPlayer.score
+                    totalScore: targetPlayer.score,
+                    details: detailedResults
                 });
 
                 room.votingIdx++;
                 room.roundVotes = {};
 
-                if (room.votingIdx >= room.players.length) {
-                    endRound(io, room);
-                } else {
-                    startVotingForPlayer(io, room);
-                }
+                // Wait 5 seconds before next player
+                setTimeout(() => {
+                    if (room.votingIdx >= room.players.length) {
+                        endRound(io, room);
+                    } else {
+                        startVotingForPlayer(io, room);
+                    }
+                }, 5000);
             }
         });
 
